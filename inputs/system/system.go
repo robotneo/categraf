@@ -8,9 +8,9 @@ import (
 	"flashcat.cloud/categraf/config"
 	"flashcat.cloud/categraf/inputs"
 	"flashcat.cloud/categraf/types"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/load"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
 )
 
 const inputName = "system"
@@ -73,6 +73,19 @@ func (s *SystemStats) Gather(slist *types.SampleList) {
 		} else if os.IsPermission(err) {
 			log.Println("W! reading os users:", err)
 		}
+	}
+
+	hostInfo, err := host.Info()
+	if err != nil {
+		log.Println("E! failed to gather host info:", err)
+	} else {
+		slist.PushSample(inputName, "info", 1, map[string]string{
+			"kernel_version": hostInfo.KernelVersion,
+			"os_name":        hostInfo.Platform,
+			"os_version":     hostInfo.PlatformVersion,
+			"hostname":       hostInfo.Hostname,
+			"host_ip":        config.Config.GetHostIP(),
+		})
 	}
 
 	slist.PushSamples(inputName, fields)

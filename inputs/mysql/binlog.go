@@ -46,7 +46,8 @@ func (ins *Instance) gatherBinlog(slist *types.SampleList, db *sql.DB, globalTag
 		filename    string
 		filesize    uint64
 		encrypted   string
-		columnCount int = len(columns)
+		algorithm   string // 加密算法（在某些版本中可用）；Reserved for future use: currently unused
+		columnCount = len(columns)
 	)
 
 	for rows.Next() {
@@ -57,6 +58,10 @@ func (ins *Instance) gatherBinlog(slist *types.SampleList, db *sql.DB, globalTag
 			}
 		case 3:
 			if err := rows.Scan(&filename, &filesize, &encrypted); err != nil {
+				return
+			}
+		case 4: // 包含加密算法的版本
+			if err := rows.Scan(&filename, &filesize, &encrypted, &algorithm); err != nil {
 				return
 			}
 		default:

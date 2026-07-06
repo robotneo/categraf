@@ -27,7 +27,7 @@ ES 7.x 支持基于角色的访问控制（RBACs）。`elasticsearch` 插件需�
 
 ### Metrics
 
-#### `cluster_health = true` 和 `cluster_health_level =  "cluster"`
+#### `cluster_health = true` 和 `cluster_health_level = "cluster"`
 
 | 名称                                                              | 类型         | 描述                       |
 |-----------------------------------------------------------------|------------|--------------------------|
@@ -483,3 +483,17 @@ ES 7.x 支持基于角色的访问控制（RBACs）。`elasticsearch` 插件需�
 | elasticsearch_slm_stats_snapshots_deleted_total          | counter | 按策略删除的快照数            |
 | elasticsearch_slm_stats_snapshot_deletion_failures_total | counter | 按策略快照删除失败次数          |
 | elasticsearch_slm_stats_operation_mode                   | gauge   | SLM操作模式（运行中，停止中，已停止） |
+
+#### `num_most_recent_indices`
+
+设置为大于 0 时，插件会对带日期或版本后缀的动态索引只采集最近 N 个索引的指标，可显著减少历史动态索引带来的指标量。该配置可与 `indices_include` 一起使用。
+
+#### `dynamic_index_matcher_regexp`
+
+与 `num_most_recent_indices` 配合使用，用于指定动态索引后缀的匹配逻辑。默认值为：
+
+```toml
+dynamic_index_matcher_regexp = ["(?P<date>(?:\\d{4}|\\d{2})[.-]?(?:\\d{2})[.-]?(?:\\d{2})?[.-]?(?:\\d{2})?)$","[\\.-._]\\d+(\\.\\d+){0,2}$"]
+```
+
+默认规则支持匹配 `YYYY.MM.DD`、`YYYY-MM-DD`、`YYYYMMDD`、`YYYY-MM-DD-HH`、`YY.MM.DD`、`YY-MM-DD` 以及类似 `v1_001`、`v0.1`、`v5.2.3` 这类版本后缀，也可以按实际索引命名自行扩展。

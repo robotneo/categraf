@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	keyset "flashcat.cloud/categraf/set/key"
 	"io"
 	"log"
 	"net"
@@ -15,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	cpuUtil "github.com/shirou/gopsutil/v3/cpu"
+	cpuUtil "github.com/shirou/gopsutil/v4/cpu"
 
 	"flashcat.cloud/categraf/config"
 	"flashcat.cloud/categraf/inputs/system"
@@ -110,7 +111,7 @@ func version() string {
 }
 
 func debug() bool {
-	return config.Config.DebugMode && strings.Contains(config.Config.InputFilters, "heartbeat")
+	return config.Config.DebugMode && strings.Contains(config.Config.InputFilters, keyset.HeartbeatAgent)
 }
 
 func work(ps *system.SystemPS, client *http.Client) {

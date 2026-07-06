@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"net/url"
@@ -19,15 +20,15 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/metadata"
+	"github.com/prometheus/prometheus/util/compression"
+	"github.com/prometheus/prometheus/util/logging"
+	"github.com/prometheus/prometheus/util/notifications"
 
-	coreconfig "flashcat.cloud/categraf/config"
 	"github.com/alecthomas/units"
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/oklog/run"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/common/promlog"
+	promlog "github.com/prometheus/common/promslog"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery"
 	_ "github.com/prometheus/prometheus/discovery/install"
@@ -41,6 +42,9 @@ import (
 	"github.com/prometheus/prometheus/tsdb/agent"
 	prom_runtime "github.com/prometheus/prometheus/util/runtime"
 	"github.com/prometheus/prometheus/web"
+
+	coreconfig "flashcat.cloud/categraf/config"
+	keyset "flashcat.cloud/categraf/set/key"
 )
 
 // config toml/yaml
@@ -130,17 +134,17 @@ func (s *readyStorage) StartTime() (int64, error) {
 }
 
 // Querier implements the Storage interface.
-func (s *readyStorage) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
+func (s *readyStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 	if x := s.get(); x != nil {
-		return x.Querier(ctx, mint, maxt)
+		return x.Querier(mint, maxt)
 	}
 	return nil, tsdb.ErrNotReady
 }
 
 // ChunkQuerier implements the Storage interface.
-func (s *readyStorage) ChunkQuerier(ctx context.Context, mint, maxt int64) (storage.ChunkQuerier, error) {
+func (s *readyStorage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, error) {
 	if x := s.get(); x != nil {
-		return x.ChunkQuerier(ctx, mint, maxt)
+		return x.ChunkQuerier(mint, maxt)
 	}
 	return nil, tsdb.ErrNotReady
 }
@@ -165,27 +169,63 @@ func (s *readyStorage) Appender(ctx context.Context) storage.Appender {
 	return notReadyAppender{}
 }
 
+func (s *readyStorage) AppenderV2(ctx context.Context) storage.AppenderV2 {
+	if x := s.get(); x != nil {
+		if app2, ok := x.(storage.AppendableV2); ok {
+			return app2.AppenderV2(ctx)
+		}
+	}
+	return notReadyAppenderV2{}
+}
+
 type notReadyAppender struct{}
 
-func (n notReadyAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+func (n notReadyAppender) Append(_ storage.SeriesRef, _ labels.Labels, _ int64, _ float64) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 
-func (n notReadyAppender) AppendExemplar(ref storage.SeriesRef, l labels.Labels, e exemplar.Exemplar) (storage.SeriesRef, error) {
+func (n notReadyAppender) AppendHistogramSTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64, _ *histogram.Histogram, _ *histogram.FloatHistogram) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 
-func (n notReadyAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram) (storage.SeriesRef, error) {
+func (n notReadyAppender) AppendSTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 
-func (n notReadyAppender) UpdateMetadata(ref storage.SeriesRef, l labels.Labels, m metadata.Metadata) (storage.SeriesRef, error) {
+type notReadyAppenderV2 struct{}
+
+func (n notReadyAppenderV2) Append(_ storage.SeriesRef, _ labels.Labels, _, _ int64, _ float64, _ *histogram.Histogram, _ *histogram.FloatHistogram, _ storage.AppendV2Options) (storage.SeriesRef, error) {
+	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppenderV2) Commit() error   { return tsdb.ErrNotReady }
+func (n notReadyAppenderV2) Rollback() error { return tsdb.ErrNotReady }
+
+func (n notReadyAppender) AppendExemplar(_ storage.SeriesRef, _ labels.Labels, _ exemplar.Exemplar) (storage.SeriesRef, error) {
+	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppender) AppendHistogram(_ storage.SeriesRef, _ labels.Labels, _ int64, _ *histogram.Histogram, _ *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppender) UpdateMetadata(_ storage.SeriesRef, _ labels.Labels, _ metadata.Metadata) (storage.SeriesRef, error) {
+	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppender) AppendHistogramCTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64, _ *histogram.Histogram, _ *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppender) AppendCTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 
 func (n notReadyAppender) Commit() error { return tsdb.ErrNotReady }
 
 func (n notReadyAppender) Rollback() error { return tsdb.ErrNotReady }
+
+func (n notReadyAppender) SetOptions(_ *storage.AppendOptions) {}
 
 // Close implements the Storage interface.
 func (s *readyStorage) Close() error {
@@ -209,11 +249,11 @@ func (s *readyStorage) CleanTombstones() error {
 }
 
 // Delete implements the api_v1.TSDBAdminStats and api_v2.TSDBAdmin interfaces.
-func (s *readyStorage) Delete(mint, maxt int64, ms ...*labels.Matcher) error {
+func (s *readyStorage) Delete(ctx context.Context, mint, maxt int64, ms ...*labels.Matcher) error {
 	if x := s.get(); x != nil {
 		switch db := x.(type) {
 		case *tsdb.DB:
-			return db.Delete(mint, maxt, ms...)
+			return db.Delete(ctx, mint, maxt, ms...)
 		default:
 			panic(fmt.Sprintf("unknown storage type %T", db))
 		}
@@ -235,11 +275,11 @@ func (s *readyStorage) Snapshot(dir string, withHead bool) error {
 }
 
 // Stats implements the api_v1.TSDBAdminStats interface.
-func (s *readyStorage) Stats(statsByLabelName string) (*tsdb.Stats, error) {
+func (s *readyStorage) Stats(statsByLabelName string, limit int) (*tsdb.Stats, error) {
 	if x := s.get(); x != nil {
 		switch db := x.(type) {
 		case *tsdb.DB:
-			return db.Head().Stats(statsByLabelName), nil
+			return db.Head().Stats(statsByLabelName, limit), nil
 		default:
 			panic(fmt.Sprintf("unknown storage type %T", db))
 		}
@@ -255,6 +295,20 @@ func (s *readyStorage) WALReplayStatus() (tsdb.WALReplayStatus, error) {
 	return tsdb.WALReplayStatus{}, tsdb.ErrNotReady
 }
 
+func (s *readyStorage) BlockMetas() ([]tsdb.BlockMeta, error) {
+	if x := s.get(); x != nil {
+		switch db := x.(type) {
+		case *tsdb.DB:
+			return db.BlockMetas(), nil
+		case *agent.DB:
+			return nil, agent.ErrUnsupported
+		default:
+			panic(fmt.Sprintf("unknown storage type %T", db))
+		}
+	}
+	return nil, tsdb.ErrNotReady
+}
+
 // ErrNotReady is returned if the underlying scrape manager is not ready yet.
 var ErrNotReady = errors.New("Scrape manager not ready")
 
@@ -263,12 +317,24 @@ type reloader struct {
 	reloader func(*config.Config) error
 }
 
-func reloadConfig(filename string, expandExternalLabels, enableExemplarStorage bool, logger log.Logger, rls ...reloader) (err error) {
-	start := time.Now()
-	timings := []interface{}{}
-	level.Info(logger).Log("msg", "Loading configuration file", "filename", filename)
+type safePromQLNoStepSubqueryInterval struct {
+	value atomic.Int64
+}
 
-	conf, err := config.LoadFile(filename, true, false, logger)
+func (i *safePromQLNoStepSubqueryInterval) Set(ev model.Duration) {
+	i.value.Store(durationToInt64Millis(time.Duration(ev)))
+}
+
+func (i *safePromQLNoStepSubqueryInterval) Get(int64) int64 {
+	return i.value.Load()
+}
+
+func reloadConfig(filename string, enableExemplarStorage bool, logger *slog.Logger, noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, callback func(bool), rls ...reloader) (err error) {
+	start := time.Now()
+	timings := logger
+	logger.Info("Loading configuration file", "filename", filename)
+
+	conf, err := config.LoadFile(filename, true, logger)
 	if err != nil {
 		return fmt.Errorf("%s couldn't load configuration (--config.file=%q)", err, filename)
 	}
@@ -283,39 +349,40 @@ func reloadConfig(filename string, expandExternalLabels, enableExemplarStorage b
 	for _, rl := range rls {
 		rstart := time.Now()
 		if err := rl.reloader(conf); err != nil {
-			level.Error(logger).Log("msg", "Failed to apply configuration", "err", err)
+			logger.Error("Failed to apply configuration", "err", err)
 			failed = true
 		}
-		timings = append(timings, rl.name, time.Since(rstart))
+		timings = timings.With(rl.name, time.Since(rstart))
 	}
 	if failed {
 		return fmt.Errorf("one or more errors occurred while applying the new configuration (--config.file=%q)", filename)
 	}
 
-	l := []interface{}{"msg", "Completed loading of configuration file", "filename", filename, "totalDuration", time.Since(start)}
-	level.Info(logger).Log(append(l, timings...)...)
+	noStepSuqueryInterval.Set(conf.GlobalConfig.EvaluationInterval)
+	timings.Info("Completed loading of configuration file", "filename", filename, "totalDuration", time.Since(start))
 	return nil
 }
 
 type flagConfig struct {
 	configFile string
 
-	agentStoragePath    string
-	serverStoragePath   string
-	notifier            notifier.Options
-	forGracePeriod      model.Duration
-	outageTolerance     model.Duration
-	resendDelay         model.Duration
-	web                 web.Options
-	scrape              scrape.Options
-	tsdb                tsdbOptions
-	agent               agentOptions
-	lookbackDelta       model.Duration
-	webTimeout          model.Duration
-	queryTimeout        model.Duration
-	queryConcurrency    int
-	queryMaxSamples     int
-	RemoteFlushDeadline model.Duration
+	agentStoragePath            string
+	serverStoragePath           string
+	notifier                    notifier.Options
+	forGracePeriod              model.Duration
+	outageTolerance             model.Duration
+	resendDelay                 model.Duration
+	web                         web.Options
+	scrape                      scrape.Options
+	tsdb                        tsdbOptions
+	agent                       agentOptions
+	lookbackDelta               model.Duration
+	webTimeout                  model.Duration
+	queryTimeout                model.Duration
+	queryConcurrency            int
+	queryMaxSamples             int
+	RemoteFlushDeadline         model.Duration
+	maxNotificationsSubscribers int
 
 	featureList []string
 	// These options are extracted from featureList
@@ -332,44 +399,56 @@ type flagConfig struct {
 }
 
 // setFeatureListOptions sets the corresponding options from the featureList.
-func (c *flagConfig) setFeatureListOptions(logger log.Logger) error {
+func (c *flagConfig) setFeatureListOptions(logger *slog.Logger) error {
 	for _, f := range c.featureList {
 		opts := strings.Split(f, ",")
 		for _, o := range opts {
 			switch o {
 			case "expand-external-labels":
 				c.enableExpandExternalLabels = true
-				level.Info(logger).Log("msg", "Experimental expand-external-labels enabled")
+				logger.Info("Experimental expand-external-labels enabled")
 			case "exemplar-storage":
 				c.tsdb.EnableExemplarStorage = true
-				level.Info(logger).Log("msg", "Experimental in-memory exemplar storage enabled")
+				logger.Info("Experimental in-memory exemplar storage enabled")
 			case "memory-snapshot-on-shutdown":
 				c.tsdb.EnableMemorySnapshotOnShutdown = true
-				level.Info(logger).Log("msg", "Experimental memory snapshot on shutdown enabled")
+				logger.Info("Experimental memory snapshot on shutdown enabled")
 			case "extra-scrape-metrics":
-				c.scrape.ExtraMetrics = true
-				level.Info(logger).Log("msg", "Experimental additional scrape metrics")
+				b := true
+				config.DefaultConfig.GlobalConfig.ExtraScrapeMetrics = &b
+				config.DefaultGlobalConfig.ExtraScrapeMetrics = &b
+				logger.Warn("Experimental additional scrape metrics feature flag is deprecated")
 			case "new-service-discovery-manager":
 				c.enableNewSDManager = true
-				level.Info(logger).Log("msg", "Experimental service discovery manager")
+				logger.Info("Experimental service discovery manager")
 			case "agent":
-				level.Info(logger).Log("msg", "Experimental agent mode enabled.")
+				logger.Info("Experimental agent mode enabled.")
 			case "promql-per-step-stats":
 				c.enablePerStepStats = true
-				level.Info(logger).Log("msg", "Experimental per-step statistics reporting")
+				logger.Info("Experimental per-step statistics reporting")
 			case "auto-gomaxprocs":
 				c.enableAutoGOMAXPROCS = true
-				level.Info(logger).Log("msg", "Automatically set GOMAXPROCS to match Linux container CPU quota")
+				logger.Info("Automatically set GOMAXPROCS to match Linux container CPU quota")
 			case "":
 				continue
 			case "promql-at-modifier", "promql-negative-offset":
-				level.Warn(logger).Log("msg", "This option for --enable-feature is now permanently enabled and therefore a no-op.", "option", o)
+				logger.Warn("This option for --enable-feature is now permanently enabled and therefore a no-op.", "option", o)
 			default:
-				level.Warn(logger).Log("msg", "Unknown option for --enable-feature", "option", o)
+				logger.Info("Unknown option for --enable-feature", "option", o)
 			}
 		}
 	}
 	return nil
+}
+
+func parseCompressionType(walCompression bool, walCompressionType string) compression.Type {
+	if !walCompression {
+		return compression.None
+	}
+	if walCompressionType == "" {
+		return compression.Snappy
+	}
+	return compression.Type(walCompressionType)
 }
 
 type tsdbOptions struct {
@@ -380,6 +459,7 @@ type tsdbOptions struct {
 	NoLockfile                     bool
 	AllowOverlappingBlocks         bool
 	WALCompression                 bool
+	WALCompressionType             string
 	HeadChunksWriteQueueSize       int
 	StripeSize                     int
 	MinBlockDuration               model.Duration
@@ -391,13 +471,13 @@ type tsdbOptions struct {
 
 func (opts tsdbOptions) ToTSDBOptions() tsdb.Options {
 	return tsdb.Options{
-		WALSegmentSize:                 int(opts.WALSegmentSize),
-		MaxBlockChunkSegmentSize:       int64(opts.MaxBlockChunkSegmentSize),
-		RetentionDuration:              int64(time.Duration(opts.RetentionDuration) / time.Millisecond),
-		MaxBytes:                       int64(opts.MaxBytes),
-		NoLockfile:                     opts.NoLockfile,
-		AllowOverlappingCompaction:     true,
-		WALCompression:                 opts.WALCompression,
+		WALSegmentSize:           int(opts.WALSegmentSize),
+		MaxBlockChunkSegmentSize: int64(opts.MaxBlockChunkSegmentSize),
+		RetentionDuration:        int64(time.Duration(opts.RetentionDuration) / time.Millisecond),
+		MaxBytes:                 int64(opts.MaxBytes),
+		NoLockfile:               opts.NoLockfile,
+		//AllowOverlappingCompaction:     true,
+		WALCompression:                 parseCompressionType(opts.WALCompression, opts.WALCompressionType),
 		HeadChunksWriteQueueSize:       opts.HeadChunksWriteQueueSize,
 		StripeSize:                     opts.StripeSize,
 		MinBlockDuration:               int64(time.Duration(opts.MinBlockDuration) / time.Millisecond),
@@ -413,6 +493,7 @@ func (opts tsdbOptions) ToTSDBOptions() tsdb.Options {
 type agentOptions struct {
 	WALSegmentSize         units.Base2Bytes
 	WALCompression         bool
+	WALCompressionType     string
 	StripeSize             int
 	TruncateFrequency      model.Duration
 	MinWALTime, MaxWALTime model.Duration
@@ -462,7 +543,7 @@ func computeExternalURL(u, listenAddr string) (*url.URL, error) {
 func (opts agentOptions) ToAgentOptions() agent.Options {
 	return agent.Options{
 		WALSegmentSize:    int(opts.WALSegmentSize),
-		WALCompression:    opts.WALCompression,
+		WALCompression:    parseCompressionType(opts.WALCompression, opts.WALCompressionType),
 		StripeSize:        opts.StripeSize,
 		TruncateFrequency: time.Duration(opts.TruncateFrequency),
 		MinWALTime:        durationToInt64Millis(time.Duration(opts.MinWALTime)),
@@ -477,7 +558,7 @@ var (
 )
 
 func debug() bool {
-	return coreconfig.Config.DebugMode && strings.Contains(coreconfig.Config.InputFilters, "prometheus-agent")
+	return coreconfig.Config.DebugMode && strings.Contains(coreconfig.Config.InputFilters, keyset.PrometheusAgent)
 }
 
 func Start() {
@@ -496,7 +577,7 @@ func Start() {
 			Gatherer:   prometheus.DefaultGatherer,
 		},
 		promlogConfig: promlog.Config{
-			Level: &promlog.AllowedLevel{},
+			Level: promlog.NewLevel(),
 		},
 	}
 
@@ -510,24 +591,34 @@ func Start() {
 		cfg.promlogConfig.Level.Set("info")
 	}
 
+	notifs := notifications.NewNotifications(cfg.maxNotificationsSubscribers, prometheus.DefaultRegisterer)
+	cfg.web.NotificationsSub = notifs.Sub
+	cfg.web.NotificationsGetter = notifs.Get
+	notifs.AddNotification(notifications.StartingUp)
+
 	logger := promlog.New(&cfg.promlogConfig)
+	slog.SetDefault(logger)
 	if err = cfg.setFeatureListOptions(logger); err != nil {
 		fmt.Fprintln(os.Stderr, fmt.Errorf("%s Error parsing feature list", err))
 		os.Exit(1)
 	}
 
-	notifierManager := notifier.NewManager(&cfg.notifier, log.With(logger, "component", "notifier"))
+	notifierManager := notifier.NewManager(&cfg.notifier, model.UTF8Validation, logger.With("component", "notifier"))
 
 	ctxScrape, cancelScrape := context.WithCancel(context.Background())
 	ctxNotify, cancelNotify := context.WithCancel(context.Background())
 
-	discoveryManagerScrape := discovery.NewManager(ctxScrape, log.With(logger, "component", "discovery manager scrape"), discovery.Name("scrape"))
-	discoveryManagerNotify := discovery.NewManager(ctxNotify, log.With(logger, "component", "discovery manager notify"), discovery.Name("notify"))
-
-	if cfg.scrape.ExtraMetrics {
-		// Experimental additional scrape metrics
-		// TODO scrapeopts configurable
+	sdMetrics, err := discovery.CreateAndRegisterSDMetrics(prometheus.DefaultRegisterer)
+	if err != nil {
+		logger.Error("failed to register service discovery metrics", "err", err)
+		os.Exit(1)
 	}
+
+	discoveryManagerScrape := discovery.NewManager(ctxScrape, logger.With("component", "discovery manager scrape"), prometheus.DefaultRegisterer, sdMetrics, discovery.Name("scrape"))
+	discoveryManagerNotify := discovery.NewManager(ctxNotify, logger.With("component", "discovery manager notify"), prometheus.DefaultRegisterer, sdMetrics, discovery.Name("notify"))
+
+	noStepSubqueryInterval := &safePromQLNoStepSubqueryInterval{}
+	noStepSubqueryInterval.Set(config.DefaultGlobalConfig.EvaluationInterval)
 
 	localStorage := &readyStorage{stats: tsdb.NewDBStats()}
 
@@ -589,18 +680,30 @@ func Start() {
 
 	remoteFlushDeadline := time.Duration(1 * time.Minute)
 	localStoragePath := cfg.agentStoragePath
-	remoteStorage := remote.NewStorage(log.With(logger, "component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, localStoragePath, time.Duration(remoteFlushDeadline), scraper)
+	remoteStorage := remote.NewStorage(logger.With("component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, localStoragePath, remoteFlushDeadline, scraper, false)
 	fanoutStorage := storage.NewFanout(logger, localStorage, remoteStorage)
 
-	scrapeManager := scrape.NewManager(&cfg.scrape, log.With(logger, "component", "scrape manager"), fanoutStorage)
+	scrapeManager, err := scrape.NewManager(
+		&cfg.scrape,
+		logger.With("component", "scrape manager"),
+		logging.NewJSONFileLogger,
+		nil,
+		fanoutStorage,
+		prometheus.DefaultRegisterer,
+	)
+	if err != nil {
+		logger.Error("failed to create a scrape manager", "err", err)
+		os.Exit(1)
+	}
 	scraper.Set(scrapeManager)
 
-	cfg.web.ListenAddress = coreconfig.Config.Prometheus.WebAddress
-	if len(cfg.web.ListenAddress) == 0 {
-		cfg.web.ListenAddress = "127.0.0.1:0"
+	if len(coreconfig.Config.Prometheus.WebAddress) != 0 {
+		cfg.web.ListenAddresses = append(cfg.web.ListenAddresses, coreconfig.Config.Prometheus.WebAddress)
+	} else {
+		cfg.web.ListenAddresses = append(cfg.web.ListenAddresses, "127.0.0.1:0")
 	}
 
-	cfg.web.ExternalURL, err = computeExternalURL(cfg.prometheusURL, cfg.web.ListenAddress)
+	cfg.web.ExternalURL, err = computeExternalURL(cfg.prometheusURL, cfg.web.ListenAddresses[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, fmt.Errorf("%s parse external URL %q", err, cfg.prometheusURL))
 		os.Exit(2)
@@ -627,10 +730,10 @@ func Start() {
 	cfg.web.LookbackDelta = time.Duration(cfg.lookbackDelta)
 	cfg.web.IsAgent = true
 
-	webHandler := web.New(log.With(logger, "component", "web"), &cfg.web)
-	listener, err := webHandler.Listener()
+	webHandler := web.New(logger.With("component", "web"), &cfg.web)
+	listener, err := webHandler.Listeners()
 	if err != nil {
-		level.Error(logger).Log("msg", "Unable to start web listener", "err", err)
+		logger.Info("Unable to start web listener", "err", err)
 		os.Exit(1)
 	}
 
@@ -697,10 +800,10 @@ func Start() {
 				// Don't forget to release the reloadReady channel so that waiting blocks can exit normally.
 				select {
 				case sig := <-term:
-					level.Warn(logger).Log("msg", "Received "+sig.String()+" exiting gracefully...")
+					logger.Warn("Received " + sig.String() + " exiting gracefully...")
 					reloadReady.Close()
 				case <-webHandler.Quit():
-					level.Warn(logger).Log("msg", "Received termination request via web service, exiting gracefully...")
+					logger.Warn("Received termination request via web service, exiting gracefully...")
 				case <-cancel:
 					reloadReady.Close()
 				case <-stop:
@@ -711,6 +814,8 @@ func Start() {
 			},
 			func(err error) {
 				close(cancel)
+				webHandler.SetReady(web.Stopping)
+				notifs.AddNotification(notifications.ShuttingDown)
 			},
 		)
 	}
@@ -719,11 +824,11 @@ func Start() {
 		g.Add(
 			func() error {
 				err := discoveryManagerScrape.Run()
-				level.Info(logger).Log("msg", "Scrape discovery manager stopped")
+				logger.Info("Scrape discovery manager stopped")
 				return err
 			},
 			func(err error) {
-				level.Info(logger).Log("msg", "Stopping scrape discovery manager...")
+				logger.Info("Stopping scrape discovery manager...")
 				cancelScrape()
 			},
 		)
@@ -733,11 +838,11 @@ func Start() {
 		g.Add(
 			func() error {
 				err := discoveryManagerNotify.Run()
-				level.Info(logger).Log("msg", "Notify discovery manager stopped")
+				logger.Info("Notify discovery manager stopped")
 				return err
 			},
 			func(err error) {
-				level.Info(logger).Log("msg", "Stopping notify discovery manager...")
+				logger.Info("Stopping notify discovery manager...")
 				cancelNotify()
 			},
 		)
@@ -753,19 +858,26 @@ func Start() {
 				<-reloadReady.C
 
 				err := scrapeManager.Run(discoveryManagerScrape.SyncCh())
-				level.Info(logger).Log("msg", "Scrape manager stopped")
+				logger.Info("Scrape manager stopped")
 				return err
 			},
 			func(err error) {
 				// Scrape manager needs to be stopped before closing the local TSDB
 				// so that it doesn't try to write samples to a closed storage.
-				level.Info(logger).Log("msg", "Stopping scrape manager...")
+				logger.Info("Stopping scrape manager...")
 				scrapeManager.Stop()
 			},
 		)
 	}
 	{
 		// Reload handler.
+		callback := func(success bool) {
+			if success {
+				notifs.DeleteNotification(notifications.ConfigurationUnsuccessful)
+				return
+			}
+			notifs.AddNotification(notifications.ConfigurationUnsuccessful)
+		}
 
 		// Make sure that sighup handler is registered with a redirect to the channel before the potentially
 		// long and synchronous tsdb init.
@@ -783,12 +895,12 @@ func Start() {
 							// broken pipe , do nothing
 							continue
 						}
-						if err := reloadConfig(cfg.configFile, cfg.enableExpandExternalLabels, cfg.tsdb.EnableExemplarStorage, logger, reloaders...); err != nil {
-							level.Error(logger).Log("msg", "Error reloading config", "err", err)
+						if err := reloadConfig(cfg.configFile, cfg.tsdb.EnableExemplarStorage, logger, noStepSubqueryInterval, callback, reloaders...); err != nil {
+							logger.Error("Error reloading config", "err", err)
 						}
 					case rc := <-webHandler.Reload():
-						if err := reloadConfig(cfg.configFile, cfg.enableExpandExternalLabels, cfg.tsdb.EnableExemplarStorage, logger, reloaders...); err != nil {
-							level.Error(logger).Log("msg", "Error reloading config", "err", err)
+						if err := reloadConfig(cfg.configFile, cfg.tsdb.EnableExemplarStorage, logger, noStepSubqueryInterval, callback, reloaders...); err != nil {
+							logger.Error("Error reloading config", "err", err)
 							rc <- err
 						} else {
 							rc <- nil
@@ -818,14 +930,15 @@ func Start() {
 					return nil
 				}
 
-				if err := reloadConfig(cfg.configFile, cfg.enableExpandExternalLabels, cfg.tsdb.EnableExemplarStorage, logger, reloaders...); err != nil {
+				if err := reloadConfig(cfg.configFile, cfg.tsdb.EnableExemplarStorage, logger, noStepSubqueryInterval, func(bool) {}, reloaders...); err != nil {
 					return fmt.Errorf("%s error loading config from %q", err, cfg.configFile)
 				}
 
 				reloadReady.Close()
 
-				webHandler.SetReady(true)
-				level.Info(logger).Log("msg", "Server is ready to receive web requests.")
+				webHandler.SetReady(web.Ready)
+				notifs.DeleteNotification(notifications.StartingUp)
+				logger.Info("server is ready.")
 				<-cancel
 				return nil
 			},
@@ -840,7 +953,7 @@ func Start() {
 		cancel := make(chan struct{})
 		g.Add(
 			func() error {
-				level.Info(logger).Log("msg", "Starting WAL storage ...")
+				logger.Info("Starting WAL storage ...")
 				if cfg.agent.WALSegmentSize != 0 {
 					if cfg.agent.WALSegmentSize < 10*1024*1024 || cfg.agent.WALSegmentSize > 256*1024*1024 {
 						return errors.New("flag 'storage.agent.wal-segment-size' must be set between 10MB and 256MB")
@@ -857,15 +970,15 @@ func Start() {
 					return fmt.Errorf("opening storage failed %s", err)
 				}
 
-				switch fsType := prom_runtime.Statfs(localStoragePath); fsType {
+				switch fsType := prom_runtime.FsType(localStoragePath); fsType {
 				case "NFS_SUPER_MAGIC":
-					level.Warn(logger).Log("fs_type", fsType, "msg", "This filesystem is not supported and may lead to data corruption and data loss. Please carefully read https://prometheus.io/docs/prometheus/latest/storage/ to learn more about supported filesystems.")
+					logger.Warn("This filesystem is not supported and may lead to data corruption and data loss. Please carefully read https://prometheus.io/docs/prometheus/latest/storage/ to learn more about supported filesystems.", "fs_type", fsType)
 				default:
-					level.Info(logger).Log("fs_type", fsType)
+					logger.Info("Supported filesystem", "fs_type", fsType)
 				}
 
-				level.Info(logger).Log("msg", "Agent WAL storage started")
-				level.Debug(logger).Log("msg", "Agent WAL storage options",
+				logger.Info("Agent WAL storage started")
+				logger.Info("Agent WAL storage options",
 					"WALSegmentSize", cfg.agent.WALSegmentSize,
 					"WALCompression", cfg.agent.WALCompression,
 					"StripeSize", cfg.agent.StripeSize,
@@ -881,7 +994,7 @@ func Start() {
 			},
 			func(e error) {
 				if err := fanoutStorage.Close(); err != nil {
-					level.Error(logger).Log("msg", "Error stopping storage", "err", err)
+					logger.Error("Error stopping storage", "err", err)
 				}
 				close(cancel)
 			},
@@ -915,7 +1028,7 @@ func Start() {
 				<-reloadReady.C
 
 				notifierManager.Run(discoveryManagerNotify.SyncCh())
-				level.Info(logger).Log("msg", "Notifier manager stopped")
+				logger.Info("Notifier manager stopped")
 				return nil
 			},
 			func(err error) {
@@ -925,10 +1038,10 @@ func Start() {
 	}
 	atomic.StoreInt32(&isRunning, 1)
 	if err := g.Run(); err != nil {
-		level.Error(logger).Log("err", err)
+		logger.Error("run error", "err", err)
 		os.Exit(1)
 	}
-	level.Info(logger).Log("msg", "See you next time!")
+	logger.Info("See you next time!")
 }
 
 func Stop() {

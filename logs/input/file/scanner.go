@@ -56,14 +56,14 @@ type Scanner struct {
 }
 
 // NewScanner returns a new scanner.
-func NewScanner(sources *logsconfig.LogSources, tailingLimit int, pipelineProvider pipeline.Provider, registry auditor.Registry,
+func NewScanner(sources *logsconfig.LogSources, tailingLimit int, maxTraverseLimit int, maxDepthLimit int, pipelineProvider pipeline.Provider, registry auditor.Registry,
 	tailerSleepDuration time.Duration, validatePodContainerID bool, scanPeriod time.Duration) *Scanner {
 	return &Scanner{
 		pipelineProvider:       pipelineProvider,
 		tailingLimit:           tailingLimit,
 		addedSources:           sources.GetAddedForType(logsconfig.FileType),
 		removedSources:         sources.GetRemovedForType(logsconfig.FileType),
-		fileProvider:           NewProvider(tailingLimit),
+		fileProvider:           NewProvider(tailingLimit, maxTraverseLimit, maxDepthLimit),
 		tailers:                make(map[string]*Tailer),
 		registry:               registry,
 		tailerSleepDuration:    tailerSleepDuration,
@@ -75,13 +75,13 @@ func NewScanner(sources *logsconfig.LogSources, tailingLimit int, pipelineProvid
 
 // Start starts the Scanner
 func (s *Scanner) Start() {
-	go s.run()
+	util.SafeGoWithRestart("logs/scanner", s.run, 5*time.Second, s.stop, nil)
 }
 
 // Stop stops the Scanner and its tailers in parallel,
 // this call returns only when all the tailers are stopped
 func (s *Scanner) Stop() {
-	s.stop <- struct{}{}
+	close(s.stop)
 	s.cleanup()
 }
 

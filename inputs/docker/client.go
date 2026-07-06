@@ -6,19 +6,20 @@ import (
 	"net/http"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/api/types/system"
 	dockerClient "github.com/docker/docker/client"
 )
 
 var (
-	version        = "1.24" // https://docs.docker.com/engine/api/
 	defaultHeaders = map[string]string{"User-Agent": "engine-api-cli-1.0"}
 )
 
 type Client interface {
-	Info(ctx context.Context) (types.Info, error)
-	ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error)
-	ContainerStats(ctx context.Context, containerID string, stream bool) (types.ContainerStats, error)
+	Info(ctx context.Context) (system.Info, error)
+	ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error)
+	ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
 	Ping(ctx context.Context) (types.Ping, error)
 	ServiceList(ctx context.Context, options types.ServiceListOptions) ([]swarm.Service, error)
@@ -28,7 +29,10 @@ type Client interface {
 }
 
 func NewEnvClient() (Client, error) {
-	client, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv)
+	client, err := dockerClient.NewClientWithOpts(
+		dockerClient.FromEnv,
+		dockerClient.WithAPIVersionNegotiation(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +51,7 @@ func NewClient(host string, tlsConfig *tls.Config) (Client, error) {
 	client, err := dockerClient.NewClientWithOpts(
 		dockerClient.WithHTTPHeaders(defaultHeaders),
 		dockerClient.WithHTTPClient(httpClient),
-		dockerClient.WithVersion(version),
+		dockerClient.WithAPIVersionNegotiation(),
 		dockerClient.WithHost(host))
 	if err != nil {
 		return nil, err
@@ -60,16 +64,16 @@ type SocketClient struct {
 	client *dockerClient.Client
 }
 
-func (c *SocketClient) Info(ctx context.Context) (types.Info, error) {
+func (c *SocketClient) Info(ctx context.Context) (system.Info, error) {
 	return c.client.Info(ctx)
 }
 func (c *SocketClient) Ping(ctx context.Context) (types.Ping, error) {
 	return c.client.Ping(ctx)
 }
-func (c *SocketClient) ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error) {
+func (c *SocketClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
 	return c.client.ContainerList(ctx, options)
 }
-func (c *SocketClient) ContainerStats(ctx context.Context, containerID string, stream bool) (types.ContainerStats, error) {
+func (c *SocketClient) ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error) {
 	return c.client.ContainerStats(ctx, containerID, stream)
 }
 func (c *SocketClient) ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error) {

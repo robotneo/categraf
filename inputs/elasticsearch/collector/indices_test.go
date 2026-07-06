@@ -1,7 +1,7 @@
 package collector
 
 import (
-	"flashcat.cloud/categraf/pkg/filter"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,10 +37,9 @@ func TestIndices(t *testing.T) {
 		}
 		//indices := make([]string, 0)
 		indicesIncluded := make([]string, 0)
-		var numMostRecentIndices int = 0
-		indexMatchers := make(map[string]filter.Filter)
-		i := NewIndices(http.DefaultClient, u, false, true, indicesIncluded, numMostRecentIndices, indexMatchers)
-		stats, err := i.fetchAndDecodeIndexStats()
+		maxIndicesIncludeCount := 80
+		i := NewIndices(http.DefaultClient, u, false, true, indicesIncluded, maxIndicesIncludeCount)
+		stats, err := i.fetchAndDecodeIndexStats(context.Background())
 		if err != nil {
 			t.Fatalf("Failed to fetch or decode indices stats: %s", err)
 		}
@@ -115,10 +114,9 @@ func TestAliases(t *testing.T) {
 		}
 		//indices := make([]string, 0)
 		indicesIncluded := make([]string, 0)
-		var numMostRecentIndices int = 0
-		indexMatchers := make(map[string]filter.Filter)
-		i := NewIndices(http.DefaultClient, u, false, true, indicesIncluded, numMostRecentIndices, indexMatchers)
-		stats, err := i.fetchAndDecodeIndexStats()
+		maxIndicesIncludeCount := 80
+		i := NewIndices(http.DefaultClient, u, false, true, indicesIncluded, maxIndicesIncludeCount)
+		stats, err := i.fetchAndDecodeIndexStats(context.Background())
 		if err != nil {
 			t.Fatalf("Failed to fetch or decode indices stats: %s", err)
 		}

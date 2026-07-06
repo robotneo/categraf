@@ -48,6 +48,14 @@ func (s *DiskStats) Gather(slist *types.SampleList) {
 	}
 
 	for i, du := range disks {
+		// Filter ignored mount points first (including when device_error=1).
+		if len(s.IgnoreMountPoints) > 0 {
+			if choice.ContainsPrefix(du.Path, s.IgnoreMountPoints) {
+				continue
+			}
+		}
+
+		// 处理设备错误
 		if du.DeviceError == 1 {
 			tags := map[string]string{
 				"path":   du.Path,
@@ -60,17 +68,13 @@ func (s *DiskStats) Gather(slist *types.SampleList) {
 			slist.PushSamples("disk", fields, tags)
 			continue
 		}
+
+		// 跳过空文件系统
 		if du.Total == 0 {
-			// Skip dummy filesystem (procfs, cgroupfs, ...)
 			continue
 		}
 
-		if len(s.IgnoreMountPoints) > 0 {
-			if choice.ContainsPrefix(du.Path, s.IgnoreMountPoints) {
-				continue
-			}
-		}
-
+		// 正常采集逻辑
 		mountOpts := MountOptions(partitions[i].Opts)
 		tags := map[string]string{
 			"path":   du.Path,

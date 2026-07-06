@@ -1,4 +1,4 @@
-// Copyright 2021 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,39 +15,40 @@ package collector
 
 import (
 	"encoding/json"
-	"flashcat.cloud/categraf/pkg/filter"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"path"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
+	"flashcat.cloud/categraf/pkg/filter"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // IndicesSettings information struct
 type IndicesSettings struct {
-	client               *http.Client
-	url                  *url.URL
-	indicesIncluded      []string
-	numMostRecentIndices int
-	indexMatchers        map[string]filter.Filter
+	client *http.Client
+	url    *url.URL
 
-	up              prometheus.Gauge
 	readOnlyIndices prometheus.Gauge
 
-	totalScrapes, jsonParseFailures prometheus.Counter
-	metrics                         []*indicesSettingsMetric
+	metrics []*indicesSettingsMetric
+
+	// categraf configurations
+	indicesIncluded        []string
+	numMostRecentIndices   int
+	indexMatchers          map[string]filter.Filter
+	maxIndicesIncludeCount int
 }
 
 var (
 	defaultIndicesTotalFieldsLabels = []string{"index"}
-	defaultTotalFieldsValue         = 1000 //es default configuration for total fields
-	defaultDateCreation             = 0    //es index default creation date
+	defaultTotalFieldsValue         = 1000 // es default configuration for total fields
+	defaultDateCreation             = 0    // es index default creation date
 )
 
 type indicesSettingsMetric struct {
@@ -57,30 +58,18 @@ type indicesSettingsMetric struct {
 }
 
 // NewIndicesSettings defines Indices Settings Prometheus metrics
-func NewIndicesSettings(client *http.Client, url *url.URL, indicesIncluded []string, numMostRecentIndices int, indexMatchers map[string]filter.Filter) *IndicesSettings {
+func NewIndicesSettings(client *http.Client, url *url.URL, indicesIncluded []string, maxIndicesIncludeCount int) *IndicesSettings {
 	return &IndicesSettings{
-		client:               client,
-		url:                  url,
-		indicesIncluded:      indicesIncluded,
-		numMostRecentIndices: numMostRecentIndices,
-		indexMatchers:        indexMatchers,
+		client:                 client,
+		url:                    url,
+		indicesIncluded:        indicesIncluded,
+		maxIndicesIncludeCount: maxIndicesIncludeCount,
 
-		up: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: prometheus.BuildFQName(namespace, "indices_settings_stats", "up"),
-			Help: "Was the last scrape of the Elasticsearch Indices Settings endpoint successful.",
-		}),
-		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: prometheus.BuildFQName(namespace, "indices_settings_stats", "total_scrapes"),
-			Help: "Current total Elasticsearch Indices Settings scrapes.",
-		}),
 		readOnlyIndices: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: prometheus.BuildFQName(namespace, "indices_settings_stats", "read_only_indices"),
 			Help: "Current number of read only indices within cluster",
 		}),
-		jsonParseFailures: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: prometheus.BuildFQName(namespace, "indices_settings_stats", "json_parse_failures"),
-			Help: "Number of errors while parsing JSON.",
-		}),
+
 		metrics: []*indicesSettingsMetric{
 			{
 				Type: prometheus.GaugeValue,
@@ -133,10 +122,11 @@ func NewIndicesSettings(client *http.Client, url *url.URL, indicesIncluded []str
 
 // Describe add Snapshots metrics descriptions
 func (cs *IndicesSettings) Describe(ch chan<- *prometheus.Desc) {
-	ch <- cs.up.Desc()
-	ch <- cs.totalScrapes.Desc()
 	ch <- cs.readOnlyIndices.Desc()
-	ch <- cs.jsonParseFailures.Desc()
+
+	for _, metric := range cs.metrics {
+		ch <- metric.Desc
+	}
 }
 
 func (cs *IndicesSettings) getAndParseURL(u *url.URL, data interface{}) error {
@@ -159,12 +149,10 @@ func (cs *IndicesSettings) getAndParseURL(u *url.URL, data interface{}) error {
 
 	bts, err := io.ReadAll(res.Body)
 	if err != nil {
-		cs.jsonParseFailures.Inc()
 		return err
 	}
 
 	if err := json.Unmarshal(bts, data); err != nil {
-		cs.jsonParseFailures.Inc()
 		return err
 	}
 	return nil
@@ -174,15 +162,20 @@ func (cs *IndicesSettings) fetchAndDecodeIndicesSettings() (IndicesSettingsRespo
 
 	u := *cs.url
 	//add indices filter
-	if len(cs.indicesIncluded) == 0 {
+	if len(cs.indicesIncluded) == 0 || len(cs.indicesIncluded) > cs.maxIndicesIncludeCount {
 		u.Path = path.Join(u.Path, "/_all/_settings")
-	} else {
+	} else if len(cs.indicesIncluded) <= cs.maxIndicesIncludeCount {
 		u.Path = path.Join(u.Path, "/"+strings.Join(cs.indicesIncluded, ",")+"/_settings")
 	}
+
 	var asr IndicesSettingsResponse
 	err := cs.getAndParseURL(&u, &asr)
 	if err != nil {
 		return asr, err
+	}
+
+	if len(cs.indicesIncluded) > cs.maxIndicesIncludeCount {
+		asr = cs.filterMapByKeys(asr, cs.indicesIncluded)
 	}
 
 	return asr, err
@@ -190,27 +183,12 @@ func (cs *IndicesSettings) fetchAndDecodeIndicesSettings() (IndicesSettingsRespo
 
 // Collect gets all indices settings metric values
 func (cs *IndicesSettings) Collect(ch chan<- prometheus.Metric) {
-
-	cs.totalScrapes.Inc()
-	defer func() {
-		ch <- cs.up
-		ch <- cs.totalScrapes
-		ch <- cs.jsonParseFailures
-		ch <- cs.readOnlyIndices
-	}()
-
 	asr, err := cs.fetchAndDecodeIndicesSettings()
 	if err != nil {
 		cs.readOnlyIndices.Set(0)
-		cs.up.Set(0)
 		log.Println("failed to fetch and decode cluster settings stats, err :", err)
 		return
 	}
-
-	//add config i.numMostRecentIndices process code
-	asr = cs.gatherIndividualIndicesStats(asr)
-
-	cs.up.Set(1)
 
 	var c int
 	for indexName, value := range asr {
@@ -227,65 +205,17 @@ func (cs *IndicesSettings) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	cs.readOnlyIndices.Set(float64(c))
+	ch <- cs.readOnlyIndices
 }
 
-// gatherSortedIndicesStats gathers stats for all indices in no particular order.
-func (cs *IndicesSettings) gatherIndividualIndicesStats(asr IndicesSettingsResponse) IndicesSettingsResponse {
-	newIndicesSettings := make(map[string]Index)
-
-	// Sort indices into buckets based on their configured prefix, if any matches.
-	categorizedIndexNames := cs.categorizeIndices(asr)
-	for _, matchingIndices := range categorizedIndexNames {
-		// Establish the number of each category of indices to use. User can configure to use only the latest 'X' amount.
-		indicesCount := len(matchingIndices)
-		indicesToTrackCount := indicesCount
-
-		// Sort the indices if configured to do so.
-		if cs.numMostRecentIndices > 0 {
-			if cs.numMostRecentIndices < indicesToTrackCount {
-				indicesToTrackCount = cs.numMostRecentIndices
-			}
-			sort.Strings(matchingIndices)
-		}
-
-		// Gather only the number of indexes that have been configured, in descending order (most recent, if date-stamped).
-		for i := indicesCount - 1; i >= indicesCount-indicesToTrackCount; i-- {
-			indexName := matchingIndices[i]
-			newIndicesSettings[indexName] = asr[indexName]
+func (cs *IndicesSettings) filterMapByKeys(response IndicesSettingsResponse, included []string) IndicesSettingsResponse {
+	resultMap := make(map[string]Index)
+	for key, value := range response {
+		if slices.Contains(included, key) {
+			resultMap[key] = value
 		}
 	}
-	//return new IndicesSettingsResponse
 	var isr IndicesSettingsResponse
-	isr = newIndicesSettings
+	isr = resultMap
 	return isr
-}
-
-func (cs *IndicesSettings) categorizeIndices(asr IndicesSettingsResponse) map[string][]string {
-	categorizedIndexNames := make(map[string][]string, len(asr))
-
-	// If all indices are configured to be gathered, bucket them all together.
-	if len(cs.indicesIncluded) == 0 || cs.indicesIncluded[0] == "_all" {
-		for indexName := range asr {
-			categorizedIndexNames["_all"] = append(categorizedIndexNames["_all"], indexName)
-		}
-
-		return categorizedIndexNames
-	}
-
-	// Bucket each returned index with its associated configured index (if any match).
-	for indexName := range asr {
-		match := indexName
-		for name, matcher := range cs.indexMatchers {
-			// If a configured index matches one of the returned indexes, mark it as a match.
-			if matcher.Match(match) {
-				match = name
-				break
-			}
-		}
-
-		// Bucket all matching indices together for sorting.
-		categorizedIndexNames[match] = append(categorizedIndexNames[match], indexName)
-	}
-
-	return categorizedIndexNames
 }

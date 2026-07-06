@@ -14,6 +14,7 @@ import (
 	"github.com/matttproud/golang_protobuf_extensions/pbutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	"flashcat.cloud/categraf/pkg/prom"
 	"flashcat.cloud/categraf/types"
@@ -116,16 +117,19 @@ func getNameAndValue(m *dto.Metric, metricName string) map[string]interface{} {
 }
 
 func Parse(buf []byte, header http.Header) (map[string]*dto.MetricFamily, error) {
-	var parser expfmt.TextParser
-
-	// gather even if the buffer begins with a newline
 	buf = bytes.TrimPrefix(buf, []byte("\n"))
+	if bytes.Contains(buf, []byte(" info\n")) {
+		buf = bytes.ReplaceAll(buf, []byte(" info\n"), []byte(" gauge\n"))
+	}
 
-	// Read raw data
-	buffer := bytes.NewBuffer(buf)
-	reader := bufio.NewReader(buffer)
+	return ParseReader(bytes.NewReader(buf), header)
+}
 
-	// Prepare output
+func ParseReader(r io.Reader, header http.Header) (map[string]*dto.MetricFamily, error) {
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+
+	reader := bufio.NewReader(r)
+
 	metricFamilies := make(map[string]*dto.MetricFamily)
 	mediatype, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err == nil && mediatype == "application/vnd.google.protobuf" &&
