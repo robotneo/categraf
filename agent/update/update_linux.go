@@ -20,7 +20,7 @@ func download(file string) (string, error) {
 	if err != nil {
 		return fname, fmt.Errorf("cannot download file from %s", file)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != 200 {
 		return fname, fmt.Errorf("download  %s error response: %s", file, res.Status)
@@ -29,14 +29,14 @@ func download(file string) (string, error) {
 	if err != nil {
 		return fname, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	bufWriter := bufio.NewWriter(f)
 
 	_, err = io.Copy(bufWriter, res.Body)
 	if err != nil {
 		return fname, err
 	}
-	bufWriter.Flush()
+	_ = bufWriter.Flush()
 	return fname, nil
 }
 
@@ -94,13 +94,13 @@ func UnTar(dst, src string) (target string, err error) {
 	if err != nil {
 		return
 	}
-	defer fr.Close()
+	defer func() { _ = fr.Close() }()
 
 	gr, err := gzip.NewReader(fr)
 	if err != nil {
 		return
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
 
@@ -142,7 +142,7 @@ func UnTar(dst, src string) (target string, err error) {
 			if err != nil {
 				return target, err
 			}
-			file.Close()
+			_ = file.Close()
 		}
 	}
 

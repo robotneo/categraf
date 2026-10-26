@@ -22,11 +22,11 @@ func readerGzipBody(contentEncoding string, request *http.Request) (bytes []byte
 		if err != nil {
 			return nil, err
 		}
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 
 		bytes, err = io.ReadAll(r)
 	case "snappy":
-		defer request.Body.Close()
+		defer func() { _ = request.Body.Close() }()
 		var compressed []byte
 		compressed, err = io.ReadAll(request.Body)
 		if err != nil {
@@ -35,7 +35,7 @@ func readerGzipBody(contentEncoding string, request *http.Request) (bytes []byte
 
 		bytes, err = snappy.Decode(nil, compressed)
 	default:
-		defer request.Body.Close()
+		defer func() { _ = request.Body.Close() }()
 		bytes, err = io.ReadAll(request.Body)
 	}
 

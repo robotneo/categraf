@@ -2,7 +2,6 @@ package install
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -172,7 +171,7 @@ func isSystemd() bool {
 	}
 
 	if err != nil {
-		fmt.Errorf("failed to run command: %s | error: %v | stdout: %s | stderr: %s",
+		log.Printf("E! failed to run command: %s | error: %v | stdout: %s | stderr: %s",
 			cmd, err, stdout.String(), stderr.String())
 		return false
 	}
