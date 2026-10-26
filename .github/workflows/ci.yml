@@ -38,7 +38,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          # Full history so the --new-from-rev baseline commit is available.
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
@@ -48,8 +49,12 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12
-          args: --timeout=10m --tests=false
-          only-new-issues: true
+          # Only flag issues introduced after the baseline so pre-existing
+          # upstream findings don't block this fork. On pull requests use the
+          # PR base commit; on manual workflow_dispatch fall back to the
+          # baseline tip. (only-new-issues has no PR diff on dispatch and would
+          # otherwise surface unrelated historical errcheck findings.)
+          args: --timeout=10m --tests=false --new-from-rev=${{ github.event.pull_request.base.sha || 'd976736' }}
           skip-cache: true
       - name: Run go version check
         run: make go-version-check
