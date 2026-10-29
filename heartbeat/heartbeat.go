@@ -22,6 +22,7 @@ import (
 	"flashcat.cloud/categraf/config"
 	"flashcat.cloud/categraf/inputs/system"
 	"flashcat.cloud/categraf/pkg/cmdx"
+	"flashcat.cloud/categraf/pkg/netx"
 )
 
 const collinterval = 3
@@ -75,9 +76,9 @@ func newHTTPClient() (*http.Client, error) {
 
 	trans := &http.Transport{
 		Proxy: proxy,
-		DialContext: (&net.Dialer{
+		DialContext: netx.DialContextFromEnv(&net.Dialer{
 			Timeout: time.Duration(config.Config.Heartbeat.DialTimeout) * time.Millisecond,
-		}).DialContext,
+		}),
 		ResponseHeaderTimeout: timeout,
 		MaxIdleConnsPerHost:   config.Config.Heartbeat.MaxIdleConnsPerHost,
 	}
@@ -254,7 +255,7 @@ func memUsage(ps *system.SystemPS) float64 {
 	return vm.UsedPercent
 }
 
-func cpuUsage(ps *system.SystemPS) float64 {
+func cpuUsage(ps system.PS) float64 {
 	var (
 		lastTotal  float64
 		lastActive float64
@@ -306,8 +307,7 @@ func cpuUsage(ps *system.SystemPS) float64 {
 }
 
 func totalCPUTime(t cpuUtil.TimesStat) float64 {
-	total := t.User + t.System + t.Nice + t.Iowait + t.Irq + t.Softirq + t.Steal + t.Idle
-	return total
+	return system.TotalCPUTime(t)
 }
 
 func activeCPUTime(t cpuUtil.TimesStat) float64 {
